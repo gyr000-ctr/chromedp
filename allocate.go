@@ -353,8 +353,8 @@ func (a *ExecAllocator) Allocate(ctx context.Context, opts ...BrowserOption) (*B
 			// so the reason is unknown. As a workaround, wait a short time
 			// before we remove the directory.
 			<-time.After(10 * time.Millisecond)
-			if err := removeAllRetry(dataDir); c.cancelErr == nil {
-				c.cancelErr = err
+			if err := removeAllRetry(dataDir); err != nil {
+				c.setCancelErr(err)
 			}
 		}
 		a.wg.Done()

@@ -66,6 +66,7 @@ type Browser struct {
 	// important, because the browser must shut itself off and save its state
 	// to disk.
 	closingGracefully chan struct{}
+	closeGraceOnce    sync.Once
 
 	// lostReason is the error that ended the connection to the browser. It
 	// is valid after LostConnection closes.
@@ -204,6 +205,7 @@ func (b *Browser) newTarget(ctx context.Context, targetID target.ID, sessionID t
 
 		messageQueue:  make(chan *cdproto.Message, 1024),
 		detached:      make(chan struct{}),
+		crashed:       make(chan struct{}),
 		frames:        make(map[cdp.FrameID]*Frame),
 		execContexts:  make(map[cdp.FrameID]runtime.ExecutionContextID),
 		execUniqueIDs: make(map[cdp.FrameID]string),
@@ -332,7 +334,7 @@ func (b *Browser) lostError(ctx context.Context) error {
 	if reason == nil {
 		reason = io.EOF
 	}
-	return fmt.Errorf("lost the connection to the browser: %w: %w", reason, context.Canceled)
+	return fmt.Errorf("lost the connection to the browser: %w: %w: %w", reason, context.Canceled, ErrBrowserDied)
 }
 
 func (b *Browser) run(ctx context.Context) {
@@ -390,6 +392,10 @@ func (b *Browser) run(ctx context.Context) {
 						return
 					case incomingQueue <- sessionMessage{detached: ev.SessionID}:
 					}
+				}
+
+				if ev, ok := ev.(*target.EventTargetCrashed); ok {
+					b.markTargetCrashed(ev)
 				}
 
 			case msg.ID != 0:
@@ -464,6 +470,30 @@ func (b *Browser) run(ctx context.Context) {
 type sessionMessage struct {
 	msg      *cdproto.Message
 	detached target.SessionID
+}
+
+// markTargetCrashed hands the browser event Target.targetCrashed to the target
+// that the event names. The target records its status and its error code, and
+// ends the commands that wait for a reply. A target that this browser does not
+// attach to, such as a tab of another client, is ignored.
+func (b *Browser) markTargetCrashed(ev *target.EventTargetCrashed) {
+	for _, t := range b.pages {
+		if t.TargetID != ev.TargetID {
+			continue
+		}
+		t.markCrashed(&TargetCrashError{
+			TargetID:  ev.TargetID,
+			Status:    ev.Status,
+			ErrorCode: ev.ErrorCode,
+		})
+		return
+	}
+}
+
+// markClosingGracefully closes closingGracefully once. More than one path can
+// end a browser, so the method makes a second call safe.
+func (b *Browser) markClosingGracefully() {
+	b.closeGraceOnce.Do(func() { close(b.closingGracefully) })
 }
 
 // noteReadError records why the connection to the browser is lost. The reader

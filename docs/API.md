@@ -895,6 +895,52 @@ if err := chromedp.Do(tabCtx); err != nil {
 
 The rules of `Listen` hold for the func. Give the option more than once to add several funcs. The [contexts](https://github.com/chromedp/examples/tree/main/contexts) example attaches to a tab with two iframes, and shows that a `Listen` call after the attach sees none of these events.
 
+### 31. Recover after a tab or a browser stops
+
+A tab can lose its renderer process. The causes include an out of memory kill and a renderer crash. The whole browser can stop too. `WithRecovery` gives the context a `RecoveryPolicy` that rebuilds the target or the browser after these events. A context without the option keeps the old behavior, so nothing changes unless you opt in.
+
+The default policy rebuilds the target up to three times and the browser up to two times. It restores the URL of the page. It uses a backoff with jitter between attempts, and it stops when you cancel the context. When it reaches a limit, it returns an error that wraps `ErrRecoveryLimit`.
+
+```go
+ctx, cancel := chromedp.NewContext(allocCtx,
+	chromedp.WithRecovery(chromedp.DefaultRecoveryPolicy()),
+)
+defer cancel()
+
+if err := chromedp.Do(ctx, chromedp.Navigate(url)); err != nil {
+	panic(err)
+}
+// When the renderer stops, the failed call returns an error that wraps
+// ErrTargetCrashed. The policy opens a new tab before the call returns.
+// The next call works on the new target, which navigated back to the URL.
+title, err := chromedp.Run(ctx, chromedp.Title())
+if err != nil {
+	panic(err)
+}
+_ = title
+```
+
+A call that fails returns the error of the crash. The package does not run the action again by default, because the package cannot know whether the action has side effects. Mark a read only action with `Idempotent` and set `RetryActions` to run it again on the new target. An action without the mark never runs twice.
+
+```go
+policy := chromedp.DefaultRecoveryPolicy()
+policy.RetryActions = true
+recoverCtx, recoverCancel := chromedp.NewContext(allocCtx, chromedp.WithRecovery(policy))
+defer recoverCancel()
+
+// Title reads a value, so running it twice is safe. The mark makes Run repeat
+// it on the target that the policy rebuilt.
+readTitle := chromedp.Idempotent(chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+	_, err := chromedp.Title()(ctx, t)
+	return err
+}))
+if err := chromedp.Do(recoverCtx, readTitle); err != nil {
+	panic(err)
+}
+```
+
+Use the `Restore` field of the policy to put back state that a new tab does not keep, such as a login or storage values. The policy runs it on each rebuilt target. A renderer crash returns a `TargetCrashError` that wraps `ErrTargetCrashed` and holds the status and the error code of the browser. A lost browser connection wraps `ErrBrowserDied`.
+
 ## What the new API removes
 
 The new API removes the interface `Action`, the type `ActionFunc`, the type `Tasks`, and the funcs `ListenTarget` and `ListenBrowser`. `Listen` and `ListenBrowser` bring back the ordered listener, with one more result, an error, and see example 28. It also removes the types `QueryAction`, `NavigateAction`, `EvaluateAction`, `CallAction`, `PollAction`, `MouseAction`, `KeyAction` and `EmulateAction`. Each type is now `Action[T]`. It also removes the six lookup options that start with `By`, except `ByFunc`. A selector type replaces each of them. `docs/MIGRATION.md` lists every change, with the old name and the new name.
@@ -1084,8 +1130,16 @@ func WithListener(fn func(ev any)) ContextOption
 func WithLogf(f func(string, ...any)) ContextOption
 func WithNewBrowserContext(options ...CreateBrowserContextOption) ContextOption
 func WithNewWindow(newWindow bool) ContextOption
+func WithRecovery(p RecoveryPolicy) ContextOption
 func WithTargetID(id target.ID) ContextOption
 func WithVisibleWindow() ContextOption
+
+func Idempotent(a Action[Void]) Action[Void]
+func DefaultRecoveryPolicy() RecoveryPolicy
+
+type RecoveryPolicy struct { ... }
+
+type TargetCrashError struct { ... }
 
 type CreateBrowserContextOption = func(*target.CreateBrowserContextParams)
 
@@ -1273,6 +1327,9 @@ ErrNotSelected
 ErrInvalidBoxModel
 ErrChannelClosed
 ErrTargetDetached
+ErrTargetCrashed
+ErrBrowserDied
+ErrRecoveryLimit
 ErrNoTarget
 ErrInvalidTarget
 ErrPageLoad

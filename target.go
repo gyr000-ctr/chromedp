@@ -12,6 +12,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	jsonv2 "github.com/chromedp/cdproto/cdp/jsonv2"
 	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/cdproto/inspector"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
@@ -31,6 +32,13 @@ type Target struct {
 	// detached closes after the target has handled every message that the
 	// browser routed to it before the detach.
 	detached chan struct{}
+
+	// crashed closes once when the renderer process of the target stops. The
+	// browser sends Inspector.targetCrashed or Target.targetCrashed then.
+	// crashErr holds the error that Call returns after the close.
+	crashed  chan struct{}
+	crashMu  sync.Mutex
+	crashErr error
 
 	// events holds the subscriptions made with Subscribe.
 	events subscribers
@@ -57,6 +65,11 @@ type Target struct {
 
 	// isWorker is true when the target is a worker target.
 	isWorker bool
+
+	// stopRun ends the ctx that run uses. The target gets it in attachTarget,
+	// which starts run. closeForRecovery calls it when a recovery policy
+	// replaces the target, so that no goroutine of the old target stays.
+	stopRun context.CancelFunc
 }
 
 func (t *Target) enclosingFrame(node *Node) cdp.FrameID {
@@ -152,6 +165,12 @@ func (t *Target) run(ctx context.Context) {
 				t.listeners = runListeners(t.listeners, ev)
 				t.listenersMu.Unlock()
 
+				// The renderer process stopped. Inspector.enable runs for every
+				// non-worker target, so this event reaches each page target.
+				if _, ok := ev.(*inspector.EventTargetCrashed); ok {
+					t.markCrashed(&TargetCrashError{TargetID: t.TargetID, Status: evTerminated})
+				}
+
 				switch msg.Method.Domain() {
 				case "Runtime", "Page", "DOM":
 					select {
@@ -184,6 +203,11 @@ func (t *Target) run(ctx context.Context) {
 // detachedMessage is the message that the browser puts in the queue of a target
 // after the last message that it routes to the target.
 var detachedMessage = new(cdproto.Message)
+
+// evTerminated is the status text that this package gives a crash when the
+// event names no status. The browser event Target.targetCrashed names the
+// status, and the session event Inspector.targetCrashed does not.
+const evTerminated = "terminated"
 
 // Call sends the command to the target, waits for the response, and decodes
 // the result into res. It satisfies [cdp.Session].
@@ -235,6 +259,8 @@ func (t *Target) Call(ctx context.Context, method string, params, res any) error
 		return t.browser.lostError(ctx)
 	case <-t.detached:
 		return t.detachedError()
+	case <-t.crashed:
+		return t.crashedError()
 	case t.browser.cmdQueue <- cmd:
 	}
 
@@ -254,6 +280,17 @@ func (t *Target) Call(ctx context.Context, method string, params, res any) error
 		return t.browser.lostError(ctx)
 	case msg := <-ch:
 		return decodeReply(msg, res)
+	case <-t.crashed:
+		// A reply that the browser sent before the crash is in the channel
+		// already. Take it first.
+		select {
+		case msg := <-ch:
+			if msg != nil {
+				return decodeReply(msg, res)
+			}
+		default:
+		}
+		return t.crashedError()
 	case <-t.detached:
 		// The target handled every earlier message before it closed detached,
 		// so a reply that exists is in the channel by now.
@@ -269,6 +306,30 @@ func (t *Target) Call(ctx context.Context, method string, params, res any) error
 // detachedError returns the error of a command on a detached target.
 func (t *Target) detachedError() error {
 	return fmt.Errorf("target %s: %w: inspected target navigated or closed", t.TargetID, ErrTargetDetached)
+}
+
+// markCrashed records that the renderer process of the target stopped. It runs
+// once. Later calls change nothing. Call returns err to every command that
+// waits for a reply, so that no command hangs on a dead target.
+func (t *Target) markCrashed(err error) {
+	t.crashMu.Lock()
+	defer t.crashMu.Unlock()
+	if t.crashErr != nil {
+		return
+	}
+	t.crashErr = err
+	close(t.crashed)
+}
+
+// crashedError returns the error of the crash, recorded with markCrashed. It
+// returns a plain ErrTargetCrashed when no detail arrived.
+func (t *Target) crashedError() error {
+	t.crashMu.Lock()
+	defer t.crashMu.Unlock()
+	if t.crashErr != nil {
+		return t.crashErr
+	}
+	return &TargetCrashError{TargetID: t.TargetID}
 }
 
 // Subscribe starts to buffer the target events with the method, and returns

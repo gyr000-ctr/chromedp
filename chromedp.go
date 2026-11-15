@@ -127,6 +127,24 @@ type Context struct {
 	// made.
 	visibleWindow bool
 
+	// recovery is set by WithRecovery. It holds the policy and the counters of
+	// the recovery of this context. It is nil for a context without recovery.
+	recovery *recoveryState
+
+	// durableCtx is like the context that NewContext returns, but the cancel
+	// of a browser that died does not end it. It derives from the context that
+	// the caller passed to NewContext, which the allocator never cancels. A
+	// recovery policy uses it for a target that it rebuilds and for the
+	// rebuild itself, so that a browser death does not cancel the recovery.
+	// The cancel of the caller ends it through stopDurable.
+	durableCtx  context.Context
+	stopDurable context.CancelFunc
+
+	// recoveryBrowserMu protects stopRecoveryBrowser. A rebuild writes it and
+	// the teardown reads it, and the two can run on different goroutines.
+	recoveryBrowserMu   sync.Mutex
+	stopRecoveryBrowser context.CancelFunc
+
 	// closedTarget lets a cancellation wait until the page of a target is
 	// closed.
 	closedTarget sync.WaitGroup
@@ -136,8 +154,56 @@ type Context struct {
 	allocated chan struct{}
 	// cancelErr is the first error that the cancellation of this context met.
 	// For example, the context failed to delete the temporary user data
-	// directory of a browser.
-	cancelErr error
+	// directory of a browser. cancelErrMu protects it, because the goroutine
+	// of the allocator and the cancellation watcher can write it at the same
+	// time, for example during a recovery.
+	cancelErrMu sync.Mutex
+	cancelErr   error
+}
+
+// setCancelErr stores err as the error of the cancellation when no error is
+// stored yet. It is safe to call from more than one goroutine.
+func (c *Context) setCancelErr(err error) {
+	if err == nil {
+		return
+	}
+	c.cancelErrMu.Lock()
+	defer c.cancelErrMu.Unlock()
+	if c.cancelErr == nil {
+		c.cancelErr = err
+	}
+}
+
+// firstCancelErr returns the error of the cancellation, or nil.
+func (c *Context) firstCancelErr() error {
+	c.cancelErrMu.Lock()
+	defer c.cancelErrMu.Unlock()
+	return c.cancelErr
+}
+
+// setRecoveryBrowser records the func that ends the allocation context of a
+// browser that a recovery started. It ends the browser of an earlier rebuild
+// first, so a replaced browser does not leak.
+func (c *Context) setRecoveryBrowser(stop context.CancelFunc) {
+	c.recoveryBrowserMu.Lock()
+	old := c.stopRecoveryBrowser
+	c.stopRecoveryBrowser = stop
+	c.recoveryBrowserMu.Unlock()
+	if old != nil {
+		old()
+	}
+}
+
+// stopRecoveryBrowserOnce ends the browser that a recovery started, and clears
+// it. A second call does nothing.
+func (c *Context) stopRecoveryBrowserOnce() {
+	c.recoveryBrowserMu.Lock()
+	stop := c.stopRecoveryBrowser
+	c.stopRecoveryBrowser = nil
+	c.recoveryBrowserMu.Unlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 // NewContext creates a chromedp context from the parent context. The context
@@ -240,6 +306,26 @@ func NewContext(parent context.Context, opts ...ContextOption) (context.Context,
 	}
 
 	ctx = context.WithValue(ctx, contextKey{}, c)
+	// durableCtx keeps the values of ctx but not the cancel of ctx. The
+	// allocator cancels ctx when the browser dies. That cancel must not end a
+	// recovery, so the goroutine below keeps durableCtx open while the browser
+	// died unexpectedly. A normal cancel, or the end of the parent context,
+	// ends durableCtx and frees the goroutine.
+	c.durableCtx, c.stopDurable = context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		select {
+		case <-parent.Done():
+			c.stopDurable()
+		case <-ctx.Done():
+			if c.Browser == nil || !c.Browser.diedUnexpectedly.Load() {
+				c.stopDurable()
+			}
+		}
+	}()
+	// When the durable context ends, end any browser that a recovery started.
+	// Both Cancel and cancelWait end the durable context, so the browser stops
+	// on either path and does not leak.
+	context.AfterFunc(c.durableCtx, c.stopRecoveryBrowserOnce)
 	c.closedTarget.Add(1)
 	go func() {
 		<-ctx.Done()
@@ -267,8 +353,8 @@ func NewContext(parent context.Context, opts ...ContextOption) (context.Context,
 		defer cancel()
 		if id := tgt.SessionID; id != "" {
 			_, err := cdp.Call(ctx, c.Browser, target.DetachFromTarget, target.DetachFromTargetParams{SessionID: id})
-			if c.cancelErr == nil && err != nil {
-				c.cancelErr = fmt.Errorf("detaching from the target %s: %w", tgt.TargetID, err)
+			if err != nil {
+				c.setCancelErr(fmt.Errorf("detaching from the target %s: %w", tgt.TargetID, err))
 			}
 		}
 		if c.detachOnCancel {
@@ -278,9 +364,7 @@ func NewContext(parent context.Context, opts ...ContextOption) (context.Context,
 		}
 		if id := tgt.TargetID; id != "" {
 			if _, err := cdp.Call(ctx, c.Browser, target.CloseTarget, target.CloseTargetParams{TargetID: id}); err != nil {
-				if c.cancelErr == nil {
-					c.cancelErr = fmt.Errorf("closing the target %s: %w", id, err)
-				}
+				c.setCancelErr(fmt.Errorf("closing the target %s: %w", id, err))
 			} else {
 				// Current Chrome answers CloseTarget before the
 				// target is gone. Wait until it is not listed.
@@ -291,21 +375,24 @@ func NewContext(parent context.Context, opts ...ContextOption) (context.Context,
 				wctx, wcancel := context.WithTimeout(ctx, 500*time.Millisecond)
 				err := waitTargetGone(wctx, c.Browser, id)
 				wcancel()
-				if err != nil && !errors.Is(err, context.DeadlineExceeded) && c.cancelErr == nil {
-					c.cancelErr = err
+				if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+					c.setCancelErr(err)
 				}
 			}
 		}
 		if c.browserContextOwner {
 			_, err := cdp.Call(ctx, c.Browser, target.DisposeBrowserContext, target.DisposeBrowserContextParams{BrowserContextID: c.BrowserContextID})
-			if c.cancelErr == nil && err != nil {
-				c.cancelErr = fmt.Errorf("disposing of the browser context %s: %w", c.BrowserContextID, err)
+			if err != nil {
+				c.setCancelErr(fmt.Errorf("disposing of the browser context %s: %w", c.BrowserContextID, err))
 			}
 		}
 	}()
 	cancelWait := func() {
 		cancel()
 		c.closedTarget.Wait()
+		// Ending the durable context runs its AfterFunc, which ends any
+		// browser that a recovery started.
+		c.stopDurable()
 		// If we allocated, wait for the browser to stop.
 		if c.allocated != nil {
 			<-c.allocated
@@ -354,7 +441,7 @@ func Cancel(ctx context.Context) error {
 	// A browser that was kept open must stay open, so Cancel does not close it.
 	graceful := c.first && c.Browser != nil && !c.Browser.keptOpen
 	if graceful {
-		close(c.Browser.closingGracefully)
+		c.Browser.markClosingGracefully()
 		if err := c.Browser.execute(ctx, browser.CommandClose, nil, nil); err != nil {
 			return err
 		}
@@ -386,7 +473,7 @@ func Cancel(ctx context.Context) error {
 	if !ready && c.allocated != nil {
 		<-c.allocated
 	}
-	return c.cancelErr
+	return c.firstCancelErr()
 }
 
 func initContextBrowser(ctx context.Context) (*Context, error) {
@@ -573,16 +660,32 @@ func (c *Context) attachTarget(ctx context.Context, targetID target.ID) error {
 	if err != nil {
 		return err
 	}
+	// The target runs on a context of its own, derived from the durable
+	// context of the caller and not the context of one call. A recovery
+	// policy can then end the goroutines of a target that it replaces without
+	// ending the context of the caller, and a target that it rebuilds
+	// survives both the short context of the rebuild and the cancel of a
+	// browser that died. The cancel of the caller still ends the target.
+	runCtx := c.durableCtx
+	if runCtx == nil {
+		runCtx = ctx
+	}
+	targetCtx, stopTarget := context.WithCancel(runCtx)
+	t.stopRun = stopTarget
 	// Add the funcs of WithListener before the target reads a message, so
 	// that they see every event that reaches the target.
 	for _, fn := range c.listeners {
-		t.listen(ctx, eventsOnly(fn))
+		t.listen(targetCtx, eventsOnly(fn))
 	}
 	c.targetMu.Lock()
 	c.Target = t
 	c.targetMu.Unlock()
 
-	go c.Target.run(ctx)
+	go c.Target.run(targetCtx)
+
+	if c.recovery != nil {
+		c.attachRecoveryListener(t, targetCtx)
+	}
 
 	// Find out whether this is a worker target. A worker cannot use
 	// Target.getTargetInfo or Target.getTargets, so find out whether "self"

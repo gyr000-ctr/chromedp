@@ -63,7 +63,7 @@ func Run[T any](ctx context.Context, a Action[T]) (T, error) {
 		var zero T
 		return zero, FromContext(ctx).withExitError(err)
 	}
-	v, err := a(ctx, c.Target)
+	v, err := withRecovery(ctx, c, a)
 	return v, c.withExitError(err)
 }
 

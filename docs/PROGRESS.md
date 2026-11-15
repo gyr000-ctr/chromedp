@@ -9,6 +9,11 @@ in [`decisions/`](decisions/README.md).
 
 These changes are not in a release yet. The first release that has them is v0.23.0. Each one has its own test.
 
+- Added: the context option `WithRecovery` gives a context a `RecoveryPolicy` that rebuilds the target after its renderer process stops and rebuilds the browser after the browser process stops. It restores the URL, runs a caller supplied `Restore` action, and bounds the attempts and the backoff. The option is opt-in, so a context without it keeps the old behavior. The decision is in `decisions/2026-11-15-recover-a-target-or-a-browser-after-it-stops.md`.
+- Added: `Idempotent` marks an action as safe to run again. With a policy that sets `RetryActions`, `Run` runs the marked action on the rebuilt target. An action without the mark never runs twice, so side effects do not repeat.
+- Added: the errors `ErrTargetCrashed`, `ErrBrowserDied`, `ErrRecoveryLimit` and the type `TargetCrashError`. A command on a stopped target returns at once with the status and the error code of the browser, instead of hanging.
+- Fixed: a data race on `Context.cancelErr` between the cancellation watcher and the goroutine of the allocator. A mutex now protects the field.
+
 - Fixed: the browser routed the detach of a target before a reply or an event that Chrome sent earlier, about half of the time. The command then returned `ErrTargetDetached`, and `Listen` missed the event. The decision is in `decisions/2026-11-05-route-the-detach-after-the-messages.md`.
 - Added: `Detached` returns a channel that closes when the browser detaches the target of the context. The decision is in `decisions/2026-11-05-export-the-detach-of-a-target.md`.
 - Added: the context option `WithListener` adds a func of `Listen` before the first command to the target, so that the func sees the events of the start of the tab. The decision is in `decisions/2026-11-05-listen-from-the-start-of-a-target.md`.

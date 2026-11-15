@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/target"
 )
 
 // ExceptionError is the error for a JavaScript exception. It wraps the
@@ -26,6 +27,35 @@ func exceptionString(e *runtime.ExceptionDetails) string {
 		fmt.Fprintf(&b, ": %s", obj.Description)
 	}
 	return b.String()
+}
+
+// TargetCrashError is the error for a target whose renderer process stopped.
+// The browser event Target.targetCrashed gives the Status and ErrorCode fields.
+// It wraps [ErrTargetCrashed], so that errors.Is finds it.
+type TargetCrashError struct {
+	// TargetID names the target that stopped.
+	TargetID target.ID
+
+	// Status is the termination status type of the browser, such as "oom".
+	// It is empty when the event names no status.
+	Status string
+
+	// ErrorCode is the termination error code of the browser. It is zero when
+	// the event names no code.
+	ErrorCode int64
+}
+
+// Error satisfies the error interface.
+func (e *TargetCrashError) Error() string {
+	if e.Status == "" {
+		return fmt.Sprintf("target %s: %s", e.TargetID, ErrTargetCrashed)
+	}
+	return fmt.Sprintf("target %s: %s: status %s, code %d", e.TargetID, ErrTargetCrashed, e.Status, e.ErrorCode)
+}
+
+// Unwrap returns ErrTargetCrashed, so that errors.Is finds it.
+func (e *TargetCrashError) Unwrap() error {
+	return ErrTargetCrashed
 }
 
 // LoadError is the error for a page that did not load. Navigate and
@@ -96,6 +126,23 @@ const (
 	// detached, for example because the page closed. The browser sends no reply
 	// to a command that is still pending when this happens.
 	ErrTargetDetached Error = "target detached"
+
+	// ErrTargetCrashed is the error of a command on a target whose renderer
+	// process stopped. The stop can be a crash, an out of memory kill or a
+	// navigation that stopped the process. A recovery policy rebuilds the
+	// target after this error. See [WithRecovery].
+	ErrTargetCrashed Error = "target crashed"
+
+	// ErrBrowserDied is the error of a command when the browser process
+	// stopped while nobody asked it to stop. A recovery policy allocates a new
+	// browser after this error when the allocator starts the browser. See
+	// [WithRecovery].
+	ErrBrowserDied Error = "the browser stopped"
+
+	// ErrRecoveryLimit is the error when the recovery policy reaches its limit
+	// of attempts. The error wraps the error of the last attempt. Use
+	// [errors.Unwrap] to read it. See [RecoveryPolicy].
+	ErrRecoveryLimit Error = "the recovery policy reached its limit of attempts"
 
 	// ErrNoTarget is the error of a func that reads the target of a context
 	// that has no target yet. The first Run opens the target.
