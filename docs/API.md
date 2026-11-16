@@ -1038,6 +1038,7 @@ func WaitNotPresent[S Selectable](sel S, opts ...QueryOption) Action[Void]
 func WaitNotVisible[S Selectable](sel S, opts ...QueryOption) Action[Void]
 func WaitReady[S Selectable](sel S, opts ...QueryOption) Action[Void]
 func WaitSelected[S Selectable](sel S, opts ...QueryOption) Action[Void]
+func WaitSettled(opts ...SettleOption) Action[SettleStats]
 func WaitVisible[S Selectable](sel S, opts ...QueryOption) Action[Void]
 
 type Allocator interface { ... }
@@ -1069,6 +1070,8 @@ func (m ConsoleMessage) IsException() bool
 func (m ConsoleMessage) String() string
 
 type ConsoleType string
+
+type ConditionStats struct { ... }
 
 type Context struct { ... }
 func FromContext(ctx context.Context) *Context
@@ -1218,6 +1221,22 @@ type Selectable interface { ... }
 
 type Selector struct { ... }
 
+type SettleOption = func(*settleTask)
+func WithDOMStable(quiet time.Duration) SettleOption
+func WithDOMStableAttributes() SettleOption
+func WithElementVisible[S Selectable](sel S, opts ...QueryOption) SettleOption
+func WithJSCondition(expression string) SettleOption
+func WithNetworkIdle(quiet time.Duration) SettleOption
+func WithNetworkInflight(n int) SettleOption
+func WithSettleTimeout(timeout time.Duration) SettleOption
+
+type SettleStats struct { ... }
+func (s SettleStats) String() string
+
+type SettleTimeoutError struct { ... }
+func (e *SettleTimeoutError) Error() string
+func (e *SettleTimeoutError) Unwrap() error
+
 type Target struct { ... }
 func (t *Target) Call(ctx context.Context, method string, params, res any) error
 func (t *Target) Subscribe(method string) (<-chan jsonv2.Value, func())
@@ -1279,6 +1298,7 @@ ErrPageLoad
 ErrNoDisplay
 ErrInvalidContext
 ErrPollingTimeout
+ErrSettleTimeout
 ErrJSUndefined
 ErrJSNull
 ErrDragOutsideViewport

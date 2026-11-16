@@ -12,6 +12,7 @@ These changes are not in a release yet. The first release that has them is v0.23
 - Fixed: the browser routed the detach of a target before a reply or an event that Chrome sent earlier, about half of the time. The command then returned `ErrTargetDetached`, and `Listen` missed the event. The decision is in `decisions/2026-11-05-route-the-detach-after-the-messages.md`.
 - Added: `Detached` returns a channel that closes when the browser detaches the target of the context. The decision is in `decisions/2026-11-05-export-the-detach-of-a-target.md`.
 - Added: the context option `WithListener` adds a func of `Listen` before the first command to the target, so that the func sees the events of the start of the tab. The decision is in `decisions/2026-11-05-listen-from-the-start-of-a-target.md`.
+- Added: `WaitSettled` waits until a set of conditions holds at the same time: network idle, a stable DOM, a visible element and a JavaScript condition. It returns `SettleStats` with the statistics of the wait, and a `SettleTimeoutError` when the timeout ends first. The decision is in `decisions/2026-11-17-wait-for-a-settled-page.md`.
 
 ## Changes after v0.20.1
 

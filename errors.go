@@ -51,6 +51,29 @@ func (e *LoadError) Unwrap() error {
 	return ErrPageLoad
 }
 
+// SettleTimeoutError is the error of a [WaitSettled] action whose timeout
+// ended before every condition held. It names the conditions that did not
+// hold, and it carries the statistics of the wait. Use [errors.As] to read
+// them, or [errors.Is] with [ErrSettleTimeout] to test for the timeout.
+type SettleTimeoutError struct {
+	// Pending is the names of the conditions that did not hold.
+	Pending []string
+
+	// Stats holds the statistics of the wait at the timeout.
+	Stats SettleStats
+}
+
+// Error satisfies the error interface.
+func (e *SettleTimeoutError) Error() string {
+	return fmt.Sprintf("%s: still waiting for %s after %s",
+		ErrSettleTimeout, strings.Join(e.Pending, ", "), e.Stats.Duration)
+}
+
+// Unwrap returns ErrSettleTimeout, so that errors.Is finds it.
+func (e *SettleTimeoutError) Unwrap() error {
+	return ErrSettleTimeout
+}
+
 // Error is a chromedp error.
 type Error string
 
@@ -116,6 +139,11 @@ const (
 
 	// ErrPollingTimeout is the error when the timeout ends before the pageFunction returns a truthy value.
 	ErrPollingTimeout Error = "waiting for function failed: timeout"
+
+	// ErrSettleTimeout is the error that every [SettleTimeoutError] wraps.
+	// The conditions of a WaitSettled action did not all hold before the
+	// timeout of the wait.
+	ErrSettleTimeout Error = "the page did not settle before the timeout"
 
 	// ErrJSUndefined is the error that the type of RemoteObject is "undefined".
 	ErrJSUndefined Error = "encountered an undefined value"

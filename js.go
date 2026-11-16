@@ -62,4 +62,10 @@ var (
 	// It is modified so that mutation polling respects the timeout even when the DOM does not mutate.
 	//go:embed js/waitForPredicatePageFunction.js
 	waitForPredicatePageFunction string
+
+	// domStableJS is a JavaScript function that waits until the DOM does not
+	// mutate during a quiet window. See the option WithDOMStable of
+	// WaitSettled.
+	//go:embed js/domStable.js
+	domStableJS string
 )

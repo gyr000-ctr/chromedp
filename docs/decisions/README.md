@@ -38,3 +38,4 @@ add.
 | 2026-11-05 | [Route the detach of a target after its messages](2026-11-05-route-the-detach-after-the-messages.md) | Decided |
 | 2026-11-05 | [Export the detach of a target as Detached](2026-11-05-export-the-detach-of-a-target.md) | Decided |
 | 2026-11-05 | [Listen to a target from its start with WithListener](2026-11-05-listen-from-the-start-of-a-target.md) | Amends 2026-11-04-export-the-ordered-event-listener.md |
+| 2026-11-17 | [Wait for a settled page with WaitSettled](2026-11-17-wait-for-a-settled-page.md) | Proposed |
